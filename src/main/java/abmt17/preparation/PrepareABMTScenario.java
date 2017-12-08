@@ -1,11 +1,17 @@
 package abmt17.preparation;
 
 import java.util.Arrays;
+import java.util.Collection;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 
+import org.matsim.api.core.v01.Id;
 import org.matsim.api.core.v01.Scenario;
 import org.matsim.api.core.v01.TransportMode;
+import org.matsim.api.core.v01.network.Link;
 import org.matsim.api.core.v01.network.Network;
+import org.matsim.api.core.v01.network.Node;
 import org.matsim.api.core.v01.population.Person;
 import org.matsim.api.core.v01.population.Plan;
 import org.matsim.api.core.v01.population.PlanElement;
@@ -27,6 +33,7 @@ import org.matsim.core.router.StageActivityTypesImpl;
 import org.matsim.core.router.TripStructureUtils;
 import org.matsim.core.scenario.ScenarioUtils;
 import org.matsim.facilities.FacilitiesWriter;
+import org.matsim.facilities.Facility;
 import org.matsim.pt.PtConstants;
 import org.matsim.utils.objectattributes.ObjectAttributesXmlWriter;
 
@@ -50,8 +57,8 @@ public class PrepareABMTScenario {
 
 		// Remove unused config groups
 		Config config = ConfigUtils.loadConfig(configPath);
-		Arrays.asList("r5", "astra", "JDEQSim", "changeMode", "counts", "households", "ptCounts",
-				"scenario", "transit", "transitRouter", "vspExperimental").forEach(m -> config.removeModule(m));
+		Arrays.asList("r5", "astra", "JDEQSim", "changeMode", "counts", "households", "ptCounts", "scenario", "transit",
+				"transitRouter", "vspExperimental").forEach(m -> config.removeModule(m));
 
 		// Adjust PT teleportation
 		ModeRoutingParams ptConfig = config.plansCalcRoute().getModeRoutingParams().get(TransportMode.pt);
@@ -61,6 +68,40 @@ public class PrepareABMTScenario {
 
 		// (Load Scenario)
 		Scenario scenario = ScenarioUtils.loadScenario(config);
+
+		{ // Remove all outside links and nodes
+			Network network = scenario.getNetwork();
+			Collection<Id<Link>> removeLinks = new HashSet<>();
+			Collection<Id<Node>> removeNodes = new HashSet<>();
+
+			for (Link link : network.getLinks().values()) {
+				if (link.getId().toString().contains("outside")) {
+					removeLinks.add(link.getId());
+				}
+			}
+
+			for (Node node : network.getNodes().values()) {
+				if (node.getId().toString().contains("outside")) {
+					removeNodes.add(node.getId());
+				}
+			}
+
+			removeLinks.forEach(l -> network.removeLink(l));
+			removeNodes.forEach(n -> network.removeNode(n));
+		}
+
+		{ // Remove all outside facilities
+			Iterator<? extends Facility> iterator = scenario.getActivityFacilities().getFacilities().values()
+					.iterator();
+
+			while (iterator.hasNext()) {
+				Facility facility = iterator.next();
+				if (facility.getLinkId().toString().contains("outside")
+						|| facility.getId().toString().contains("outside")) {
+					iterator.remove();
+				}
+			}
+		}
 
 		{ // Collapse and reroute public transport legs
 			Network network = scenario.getNetwork();
@@ -81,22 +122,28 @@ public class PrepareABMTScenario {
 					for (TripStructureUtils.Trip trip : TripStructureUtils.getTrips(elements, stageActivityTypes)) {
 						String mainMode = mainModeIdentifier.identifyMainMode(trip.getTripElements());
 
-						if (mainMode.equals(TransportMode.pt)) {
-							int index = elements.indexOf(trip.getTripElements().get(0));
-							elements.removeAll(trip.getTripElements());
-
-							elements.addAll(index,
-									ptRouter.calcRoute(
-											new LinkWrapperFacility(
-													network.getLinks().get(trip.getOriginActivity().getLinkId())),
-											new LinkWrapperFacility(
-													network.getLinks().get(trip.getDestinationActivity().getLinkId())),
-											trip.getOriginActivity().getEndTime(), person));
-						}
-
 						if (trip.getOriginActivity().getType().contains("outside")
 								|| trip.getDestinationActivity().getType().contains("outside")) {
 							hasOutsideActivity = true;
+						}
+
+						if (trip.getOriginActivity().getLinkId().toString().contains("outside")
+								|| trip.getDestinationActivity().getLinkId().toString().contains("outside")) {
+							hasOutsideActivity = true;
+						}
+
+						if (!hasOutsideActivity) {
+							if (mainMode.equals(TransportMode.pt)) {
+								int index = elements.indexOf(trip.getTripElements().get(0));
+								elements.removeAll(trip.getTripElements());
+
+								elements.addAll(index, ptRouter.calcRoute(
+										new LinkWrapperFacility(
+												network.getLinks().get(trip.getOriginActivity().getLinkId())),
+										new LinkWrapperFacility(
+												network.getLinks().get(trip.getDestinationActivity().getLinkId())),
+										trip.getOriginActivity().getEndTime(), person));
+							}
 						}
 					}
 				}
@@ -118,16 +165,16 @@ public class PrepareABMTScenario {
 		config.planCalcScore().getModes().remove("outside");
 		config.plansCalcRoute().removeModeRoutingParams("outside");
 		config.qsim().setFlowCapFactor(0.012);
-		
+
 		// Disable activity scoring
-		
-		config.planCalcScore().setPerforming_utils_hr(0.0); 
+
+		config.planCalcScore().setPerforming_utils_hr(0.0);
 		config.planCalcScore().setLateArrival_utils_hr(0.0);
 		config.planCalcScore().setEarlyDeparture_utils_hr(0.0);
 
 		// Choice model fb (adjusted)
 		config.planCalcScore().setMarginalUtilityOfMoney(0.1541236618);
-		
+
 		ModeParams carParams = config.planCalcScore().getOrCreateModeParams("car");
 		carParams.setConstant(0.0);
 		carParams.setMarginalUtilityOfTraveling(-0.1334710911 * 60.0);
